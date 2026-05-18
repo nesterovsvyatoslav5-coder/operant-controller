@@ -20,7 +20,7 @@ jobs:
           channel: stable
 
       - name: Create Flutter platform files
-        run: flutter create --platforms=windows .
+        run: flutter create --platforms=windows --project-name operant_controller .
 
       - name: Install dependencies
         run: flutter pub get
