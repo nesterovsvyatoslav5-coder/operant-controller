@@ -36,4 +36,3 @@ jobs:
         with:
           name: operant-controller-windows
           path: build/windows/x64/runner/Release/
-          
