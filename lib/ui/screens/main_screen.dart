@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 
+import '../../core/models/experiment_mode.dart';
+import '../../core/protocol/device_commands.dart';
+
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
 
@@ -13,9 +16,46 @@ class _MainScreenState extends State<MainScreen> {
   double delayMs = 200;
   double ledTimeMs = 500;
 
+  ExperimentMode mode = ExperimentMode.training;
+
   bool leftSensor = false;
   bool rightSensor = false;
   bool feederActive = false;
+
+  void _sendStart() {
+    final packet = DeviceCommands.start(
+      address: selectedDevice,
+    );
+
+    debugPrint("START PACKET: $packet");
+  }
+
+  void _sendStop() {
+    final packet = DeviceCommands.stop(
+      address: selectedDevice,
+    );
+
+    debugPrint("STOP PACKET: $packet");
+  }
+
+  void _sendParameters() {
+    final packet = DeviceCommands.setParameters(
+      address: selectedDevice,
+      delayMs: delayMs.toInt(),
+      ledTimeMs: ledTimeMs.toInt(),
+    );
+
+    debugPrint("PARAM PACKET: $packet");
+  }
+
+  void _sendMode() {
+    final packet = DeviceCommands.setMode(
+      address: selectedDevice,
+      mode: mode,
+    );
+
+    debugPrint("MODE PACKET: $packet");
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -25,7 +65,6 @@ class _MainScreenState extends State<MainScreen> {
       ),
       body: Row(
         children: [
-          // Левая панель
           Container(
             width: 260,
             color: Colors.black12,
@@ -37,6 +76,7 @@ class _MainScreenState extends State<MainScreen> {
                   "Устройства",
                   style: TextStyle(fontSize: 22),
                 ),
+
                 const SizedBox(height: 20),
 
                 DropdownButton<int>(
@@ -57,15 +97,26 @@ class _MainScreenState extends State<MainScreen> {
 
                 const SizedBox(height: 20),
 
-                ElevatedButton(
-                  onPressed: () {},
-                  child: const Text("Подключиться"),
+                DropdownButton<ExperimentMode>(
+                  value: mode,
+                  items: ExperimentMode.values.map((m) {
+                    return DropdownMenuItem(
+                      value: m,
+                      child: Text(m.title),
+                    );
+                  }).toList(),
+                  onChanged: (value) {
+                    setState(() {
+                      mode = value!;
+                    });
+
+                    _sendMode();
+                  },
                 ),
               ],
             ),
           ),
 
-          // Правая часть
           Expanded(
             child: Padding(
               padding: const EdgeInsets.all(20),
@@ -79,7 +130,6 @@ class _MainScreenState extends State<MainScreen> {
 
                   const SizedBox(height: 20),
 
-                  // Delay
                   Text("Задержка: ${delayMs.toInt()} мс"),
 
                   Slider(
@@ -95,7 +145,6 @@ class _MainScreenState extends State<MainScreen> {
 
                   const SizedBox(height: 20),
 
-                  // LED
                   Text("Время свечения: ${ledTimeMs.toInt()} мс"),
 
                   Slider(
@@ -114,14 +163,21 @@ class _MainScreenState extends State<MainScreen> {
                   Row(
                     children: [
                       ElevatedButton(
-                        onPressed: () {},
+                        onPressed: _sendParameters,
+                        child: const Text("Установить параметры"),
+                      ),
+
+                      const SizedBox(width: 10),
+
+                      ElevatedButton(
+                        onPressed: _sendStart,
                         child: const Text("Старт"),
                       ),
 
                       const SizedBox(width: 10),
 
                       ElevatedButton(
-                        onPressed: () {},
+                        onPressed: _sendStop,
                         child: const Text("Стоп"),
                       ),
                     ],
