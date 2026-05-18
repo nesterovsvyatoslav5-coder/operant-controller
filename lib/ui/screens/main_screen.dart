@@ -1,7 +1,11 @@
+import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 import '../../core/models/experiment_mode.dart';
 import '../../core/protocol/device_commands.dart';
+import '../../core/serial/serial_service.dart';
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -11,59 +15,153 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> {
+  final SerialService serial = SerialService();
+  StreamSubscription<Uint8List>? subscription;
+
+  List<String> ports = [];
+  String? selectedPort;
+
   int selectedDevice = 1;
   ExperimentMode mode = ExperimentMode.training;
 
   double delayMs = 200;
   double ledTimeMs = 500;
-  double timeoutMs = 3000;
-  double trials = 100;
-
   bool connected = false;
-  bool leftSensor = true;
-  bool rightSensor = false;
-  bool feederActive = true;
 
-  final List<String> logs = [
-    "Программа запущена",
-    "Ожидание подключения устройства",
-  ];
+  bool leftSensor = false;
+  bool rightSensor = false;
+  bool feederActive = false;
+
+  final List<String> logs = ["Программа запущена"];
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshPorts();
+  }
+
+  @override
+  void dispose() {
+    subscription?.cancel();
+    serial.disconnect();
+    super.dispose();
+  }
+
+  void _refreshPorts() {
+    setState(() {
+      ports = serial.getAvailablePorts();
+      selectedPort = ports.isNotEmpty ? ports.first : null;
+    });
+    _log("Список COM-портов обновлён");
+  }
+
+  void _connect() {
+    if (connected) {
+      subscription?.cancel();
+      serial.disconnect();
+      setState(() => connected = false);
+      _log("Отключено");
+      return;
+    }
+
+    if (selectedPort == null) {
+      _log("COM-порт не выбран");
+      return;
+    }
+
+    final ok = serial.connect(selectedPort!);
+
+    if (!ok) {
+      _log("Ошибка подключения к $selectedPort");
+      return;
+    }
+
+    subscription = serial.listen()?.listen(_onDataReceived);
+
+    setState(() => connected = true);
+    _log("Подключено к $selectedPort");
+  }
+
+  void _onDataReceived(Uint8List data) {
+    _log("RX: ${data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}");
+
+    if (data.length >= 7 && data[0] == 0xAA && data[2] == 0x86) {
+      setState(() {
+        leftSensor = data[4] == 1;
+        rightSensor = data.length > 5 ? data[5] == 1 : false;
+        feederActive = data.length > 6 ? data[6] == 1 : false;
+      });
+    }
+  }
+
+  void _send(Uint8List packet, String title) {
+    if (!connected) {
+      _log("Нет подключения к COM-порту");
+      return;
+    }
+
+    serial.send(packet);
+    _log("$title отправлена");
+    _log("TX: ${packet.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}");
+  }
+
+  void _sendStart() {
+    _send(
+      DeviceCommands.start(address: selectedDevice),
+      "Команда START",
+    );
+  }
+
+  void _sendStop() {
+    _send(
+      DeviceCommands.stop(address: selectedDevice),
+      "Команда STOP",
+    );
+  }
+
+  void _sendParameters() {
+    _send(
+      DeviceCommands.setParameters(
+        address: selectedDevice,
+        delayMs: delayMs.toInt(),
+        ledTimeMs: ledTimeMs.toInt(),
+      ),
+      "Параметры",
+    );
+  }
+
+  void _sendMode() {
+    _send(
+      DeviceCommands.setMode(address: selectedDevice, mode: mode),
+      "Режим ${mode.title}",
+    );
+  }
+
+  void _requestStatus() {
+    _send(
+      DeviceCommands.requestStatus(address: selectedDevice),
+      "Запрос статуса",
+    );
+  }
+
+  void _feedNow() {
+    _send(
+      DeviceCommands.feedNow(address: selectedDevice),
+      "Выдача корма",
+    );
+  }
+
+  void _resetStats() {
+    _send(
+      DeviceCommands.resetStatistics(address: selectedDevice),
+      "Сброс статистики",
+    );
+  }
 
   void _log(String text) {
     setState(() {
       logs.insert(0, "${TimeOfDay.now().format(context)}  $text");
     });
-  }
-
-  void _sendStart() {
-    final packet = DeviceCommands.start(address: selectedDevice);
-    debugPrint("START PACKET: $packet");
-    _log("Сессия запущена для устройства $selectedDevice");
-  }
-
-  void _sendStop() {
-    final packet = DeviceCommands.stop(address: selectedDevice);
-    debugPrint("STOP PACKET: $packet");
-    _log("Сессия остановлена");
-  }
-
-  void _sendParameters() {
-    final packet = DeviceCommands.setParameters(
-      address: selectedDevice,
-      delayMs: delayMs.toInt(),
-      ledTimeMs: ledTimeMs.toInt(),
-    );
-    debugPrint("PARAM PACKET: $packet");
-    _log("Параметры отправлены на устройство $selectedDevice");
-  }
-
-  void _sendMode() {
-    final packet = DeviceCommands.setMode(
-      address: selectedDevice,
-      mode: mode,
-    );
-    debugPrint("MODE PACKET: $packet");
-    _log("Выбран режим: ${mode.title}");
   }
 
   @override
@@ -117,7 +215,7 @@ class _MainScreenState extends State<MainScreen> {
 
   Widget _sideBar() {
     return Container(
-      width: 270,
+      width: 280,
       color: const Color(0xFF111827),
       padding: const EdgeInsets.all(18),
       child: Column(
@@ -125,14 +223,26 @@ class _MainScreenState extends State<MainScreen> {
         children: [
           const Text("Operant Controller",
               style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 30),
+          const SizedBox(height: 28),
+
           _label("COM-порт"),
-          _button(connected ? "Отключиться" : "Подключиться", () {
-            setState(() => connected = !connected);
-            _log(connected ? "Подключено к COM-порту" : "Отключено");
-          }),
+          DropdownButton<String>(
+            value: selectedPort,
+            dropdownColor: const Color(0xFF1F2937),
+            isExpanded: true,
+            hint: const Text("Порт не найден"),
+            items: ports
+                .map((p) => DropdownMenuItem(value: p, child: Text(p)))
+                .toList(),
+            onChanged: connected ? null : (v) => setState(() => selectedPort = v),
+          ),
+          const SizedBox(height: 8),
+          _button("Обновить порты", _refreshPorts),
+          const SizedBox(height: 8),
+          _button(connected ? "Отключиться" : "Подключиться", _connect),
+
           const SizedBox(height: 24),
-          _label("Устройства"),
+          _label("Устройство"),
           DropdownButton<int>(
             value: selectedDevice,
             dropdownColor: const Color(0xFF1F2937),
@@ -146,6 +256,7 @@ class _MainScreenState extends State<MainScreen> {
             ),
             onChanged: (v) => setState(() => selectedDevice = v!),
           ),
+
           const SizedBox(height: 24),
           _label("Режим"),
           DropdownButton<ExperimentMode>(
@@ -160,10 +271,11 @@ class _MainScreenState extends State<MainScreen> {
               _sendMode();
             },
           ),
+
           const Spacer(),
           Text("Статус: ${connected ? "Подключено" : "Отключено"}"),
           const SizedBox(height: 8),
-          const Text("Версия 1.0.0"),
+          const Text("Версия 1.1.0"),
         ],
       ),
     );
@@ -173,7 +285,7 @@ class _MainScreenState extends State<MainScreen> {
     return Container(
       height: 72,
       padding: const EdgeInsets.symmetric(horizontal: 24),
-      decoration: const BoxDecoration(color: Color(0xFF020617)),
+      color: const Color(0xFF020617),
       child: Row(
         children: [
           const Text("Панель управления экспериментом",
@@ -183,7 +295,7 @@ class _MainScreenState extends State<MainScreen> {
               color: connected ? Colors.greenAccent : Colors.redAccent,
               size: 12),
           const SizedBox(width: 8),
-          Text(connected ? "Подключено" : "Не подключено"),
+          Text(connected ? "Подключено: $selectedPort" : "Не подключено"),
         ],
       ),
     );
@@ -194,13 +306,11 @@ class _MainScreenState extends State<MainScreen> {
       children: [
         Expanded(child: _cardInfo("Режим", mode.title, Icons.school)),
         const SizedBox(width: 14),
-        Expanded(
-            child: _cardInfo("Устройство",
-                "№ $selectedDevice", Icons.memory)),
+        Expanded(child: _cardInfo("Устройство", "№ $selectedDevice", Icons.memory)),
         const SizedBox(width: 14),
-        Expanded(child: _cardInfo("Награды", "0", Icons.card_giftcard)),
+        Expanded(child: _cardInfo("COM", selectedPort ?? "—", Icons.usb)),
         const SizedBox(width: 14),
-        Expanded(child: _cardInfo("Ошибки", "0", Icons.error_outline)),
+        Expanded(child: _cardInfo("Статус", connected ? "Online" : "Offline", Icons.circle)),
       ],
     );
   }
@@ -208,30 +318,11 @@ class _MainScreenState extends State<MainScreen> {
   Widget _deviceStatusCard() {
     return _panel(
       "Состояние устройства",
-      Row(
+      Column(
         children: [
-          Expanded(
-            child: Column(
-              children: [
-                _statusLine("Левый датчик", leftSensor),
-                _statusLine("Правый датчик", rightSensor),
-                _statusLine("Кормушка", feederActive),
-              ],
-            ),
-          ),
-          Expanded(
-            child: Container(
-              height: 210,
-              decoration: BoxDecoration(
-                color: const Color(0xFF020617),
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: Colors.blueGrey.shade700),
-              ),
-              child: const Center(
-                child: Icon(Icons.pets, size: 80, color: Colors.blueAccent),
-              ),
-            ),
-          ),
+          _statusLine("Левый датчик", leftSensor),
+          _statusLine("Правый датчик", rightSensor),
+          _statusLine("Кормушка", feederActive),
         ],
       ),
     );
@@ -250,11 +341,11 @@ class _MainScreenState extends State<MainScreen> {
             ],
           ),
           const SizedBox(height: 12),
-          _button("Выдать корм сейчас", () => _log("Кормушка активирована")),
+          _button("Выдать корм сейчас", _feedNow),
           const SizedBox(height: 10),
-          _button("Запросить статус", () => _log("Запрос состояния отправлен")),
+          _button("Запросить статус", _requestStatus),
           const SizedBox(height: 10),
-          _button("Сброс статистики", () => _log("Статистика сброшена")),
+          _button("Сброс статистики", _resetStats),
         ],
       ),
     );
@@ -267,8 +358,6 @@ class _MainScreenState extends State<MainScreen> {
         children: [
           _slider("Задержка", delayMs, 0, 2000, (v) => setState(() => delayMs = v)),
           _slider("Свечение", ledTimeMs, 0, 5000, (v) => setState(() => ledTimeMs = v)),
-          _slider("Таймаут", timeoutMs, 0, 10000, (v) => setState(() => timeoutMs = v)),
-          _slider("Кол-во проб", trials, 1, 300, (v) => setState(() => trials = v)),
           const SizedBox(height: 12),
           _button("Отправить параметры", _sendParameters),
         ],
@@ -280,12 +369,9 @@ class _MainScreenState extends State<MainScreen> {
     return _panel(
       "Мониторинг поведения",
       Container(
-        height: 260,
+        height: 250,
         alignment: Alignment.center,
-        child: const Text(
-          "Здесь будет график событий: датчики, награды, ошибки",
-          style: TextStyle(color: Colors.white70),
-        ),
+        child: const Text("График событий будет добавлен следующим этапом"),
       ),
     );
   }
@@ -294,7 +380,7 @@ class _MainScreenState extends State<MainScreen> {
     return _panel(
       "Лог событий",
       SizedBox(
-        height: 260,
+        height: 250,
         child: ListView.builder(
           itemCount: logs.length,
           itemBuilder: (_, i) => Padding(
@@ -317,9 +403,7 @@ class _MainScreenState extends State<MainScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title,
-              style:
-                  const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 16),
           child,
         ],
@@ -332,11 +416,9 @@ class _MainScreenState extends State<MainScreen> {
       title,
       Row(
         children: [
-          Icon(icon, color: Colors.blueAccent, size: 32),
-          const SizedBox(width: 14),
-          Text(value,
-              style:
-                  const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+          Icon(icon, color: Colors.blueAccent, size: 30),
+          const SizedBox(width: 12),
+          Expanded(child: Text(value, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold))),
         ],
       ),
     );
@@ -347,25 +429,22 @@ class _MainScreenState extends State<MainScreen> {
       padding: const EdgeInsets.symmetric(vertical: 10),
       child: Row(
         children: [
-          Icon(Icons.circle,
-              size: 14, color: active ? Colors.greenAccent : Colors.redAccent),
+          Icon(Icons.circle, size: 14, color: active ? Colors.greenAccent : Colors.redAccent),
           const SizedBox(width: 10),
           Text(title),
           const Spacer(),
           Text(active ? "АКТИВЕН" : "НЕ АКТИВЕН",
-              style: TextStyle(
-                  color: active ? Colors.greenAccent : Colors.redAccent)),
+              style: TextStyle(color: active ? Colors.greenAccent : Colors.redAccent)),
         ],
       ),
     );
   }
 
-  Widget _slider(String title, double value, double min, double max,
-      ValueChanged<double> onChanged) {
+  Widget _slider(String title, double value, double min, double max, ValueChanged<double> onChanged) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text("$title: ${value.toInt()}"),
+        Text("$title: ${value.toInt()} мс"),
         Slider(value: value, min: min, max: max, onChanged: onChanged),
       ],
     );
@@ -398,8 +477,7 @@ class _MainScreenState extends State<MainScreen> {
   Widget _label(String text) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
-      child: Text(text,
-          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+      child: Text(text, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
     );
   }
 }
